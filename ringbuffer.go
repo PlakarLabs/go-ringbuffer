@@ -36,7 +36,7 @@ type RingBuffer struct {
 
 var ErrBufferFull = errors.New("ringbuffer: buffer is full")
 
-func NewReaderSize(rd io.Reader, size int) io.Reader {
+func NewReaderSize(rd io.Reader, size int) *RingBuffer {
 	rb := &RingBuffer{
 		rd:      rd,
 		buffer:  make([]byte, size),
