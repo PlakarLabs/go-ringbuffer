@@ -18,67 +18,75 @@ package ringbuffer
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"sync"
 )
 
 type RingBuffer struct {
-	rd     io.Reader
-	buffer []byte
-	rdErr  error
+	rd      io.Reader
+	rdErr   error
+	prefill []byte
 
-	head   int
-	tail   int
-	filled bool
+	buffer      []byte
+	bufferMutex sync.Mutex
+	head        int
+	tail        int
+	filled      bool
 
-	canFill chan bool
-	canRead chan bool
+	callMutex sync.Mutex
 }
 
 var ErrBufferFull = errors.New("ringbuffer: buffer is full")
 
-func NewReaderSize(rd io.Reader, size int) *RingBuffer {
-	rb := &RingBuffer{
-		rd:      rd,
-		buffer:  make([]byte, size),
-		canFill: make(chan bool, 1),
-		canRead: make(chan bool, 1),
+func New(size int) *RingBuffer {
+	return &RingBuffer{
+		buffer: make([]byte, size),
 	}
-	go func() {
-		rb.canFill <- true
-		fillbuf := make([]byte, size)
+}
 
-		for {
-			<-rb.canFill
-			capacity := rb.Capacity()
-
-			n, err := rb.rd.Read(fillbuf[:capacity])
-			if err != nil && err != io.EOF {
-				rb.rdErr = err
-				break
-			}
-
-			rb.Write(fillbuf[:n])
-			if err == io.EOF {
-				rb.rdErr = io.EOF
-				close(rb.canFill)
-				break
-			}
-		}
-
-	}()
-
+func NewReaderSize(rd io.Reader, size int) *RingBuffer {
+	rb := New(size)
+	rb.rd = rd
+	rb.prefill = make([]byte, size)
+	rb.prefillBuffer()
 	return rb
 }
 
+func (rb *RingBuffer) prefillBuffer() {
+	if rb.rd != nil && rb.Capacity() != 0 && rb.rdErr != io.EOF {
+		n, err := rb.rd.Read(rb.prefill)
+		if err != nil && err != io.EOF {
+			rb.rdErr = err
+			return
+		}
+		rb.writeBytes(rb.prefill[:n])
+		if err == io.EOF {
+			rb.rd = nil
+			rb.rdErr = io.EOF
+		}
+	}
+}
+
+func (rb *RingBuffer) Slice(start, end int) []byte {
+	rb.bufferMutex.Lock()
+	defer rb.bufferMutex.Unlock()
+	return rb.buffer[start:end]
+}
+
 func (rb *RingBuffer) IsEmpty() bool {
+	rb.bufferMutex.Lock()
+	defer rb.bufferMutex.Unlock()
 	return rb.head == rb.tail && !rb.filled
 }
 
 func (rb *RingBuffer) IsFull() bool {
+	rb.bufferMutex.Lock()
+	defer rb.bufferMutex.Unlock()
 	return rb.filled
 }
 
-func (rb *RingBuffer) Capacity() int {
+func (rb *RingBuffer) capacity() int {
 	if rb.filled {
 		return 0
 	}
@@ -91,105 +99,131 @@ func (rb *RingBuffer) Capacity() int {
 	}
 }
 
+func (rb *RingBuffer) Capacity() int {
+	rb.bufferMutex.Lock()
+	defer rb.bufferMutex.Unlock()
+	return rb.capacity()
+}
+
+func (rb *RingBuffer) len() int {
+	return cap(rb.buffer) - rb.capacity()
+}
+
 func (rb *RingBuffer) Len() int {
-	return cap(rb.buffer) - rb.Capacity()
+	rb.bufferMutex.Lock()
+	defer rb.bufferMutex.Unlock()
+
+	return rb.len()
+}
+
+func (rb *RingBuffer) writeBytes(data []byte) {
+	rb.bufferMutex.Lock()
+	defer rb.bufferMutex.Unlock()
+
+	delta := rb.tail - rb.head
+	if delta < 0 {
+		delta += cap(rb.buffer)
+	} else {
+		delta = cap(rb.buffer) - delta
+	}
+	if delta < len(data) {
+		panic("RingBuffer overflow")
+	}
+
+	if rb.tail+len(data) <= cap(rb.buffer) {
+		copy(rb.buffer[rb.tail:], data)
+	} else {
+		pivot := cap(rb.buffer) - rb.tail
+		copy(rb.buffer[rb.tail:], data[:pivot])
+		copy(rb.buffer[0:], data[pivot:])
+	}
+
+	rb.tail = (rb.tail + len(data)) % cap(rb.buffer)
+	if rb.head == rb.tail {
+		rb.filled = true
+	}
 }
 
 func (rb *RingBuffer) Write(data []byte) (int, error) {
-	if rb.filled {
+	rb.callMutex.Lock()
+	defer rb.callMutex.Unlock()
+
+	rb.bufferMutex.Lock()
+	filled := rb.filled
+	rb.bufferMutex.Unlock()
+	if filled {
 		return 0, ErrBufferFull
 	}
 
 	nbytes := len(data)
-
-	var err error
-	delta := rb.tail - rb.head
-	if delta < 0 {
-		delta = -delta
-		if delta < len(data) {
-			nbytes = delta
-		}
-		copy(rb.buffer[rb.tail:], data[:nbytes])
-	} else {
-		// tail is after head ... BUT may overlap buffer boundary
-		delta = cap(rb.buffer) - delta
-		if delta < len(data) {
-			nbytes = delta
-		}
-
-		if rb.tail+nbytes <= cap(rb.buffer) {
-			copy(rb.buffer[rb.tail:], data[:nbytes])
-		} else {
-			pivot := cap(rb.buffer) - rb.tail
-			copy(rb.buffer[rb.tail:], data[:pivot])
-			copy(rb.buffer[0:], data[pivot:])
-		}
+	capacity := rb.Capacity()
+	if nbytes > capacity {
+		nbytes = capacity
 	}
 
-	rb.tail = (rb.tail + nbytes) % cap(rb.buffer)
-	if rb.head == rb.tail {
-		rb.filled = true
-	}
+	fmt.Println("will attempt to write", nbytes)
 
+	rb.writeBytes(data[:nbytes])
+
+	//fmt.Println("write:", "head", rb.head, "tail", rb.tail, "filled", rb.filled, "len", rb.Len(), "cap", rb.Capacity())
 	if nbytes != len(data) {
-		err = io.ErrShortWrite
+		return nbytes, io.ErrShortWrite
+	}
+	return nbytes, nil
+}
+
+func (rb *RingBuffer) readBytes(data []byte) {
+	rb.bufferMutex.Lock()
+	defer rb.bufferMutex.Unlock()
+
+	n := len(data)
+	if n > rb.len() {
+		panic("RingBuffer underflow")
 	}
 
-	if !rb.IsEmpty() {
-		rb.canRead <- true
+	if rb.head+n <= cap(rb.buffer) {
+		copy(data, rb.buffer[rb.head:rb.head+n])
+	} else {
+		pivot := cap(rb.buffer) - rb.head
+		copy(data[:pivot], rb.buffer[rb.head:])
+		copy(data[pivot:], rb.buffer[:n-pivot])
 	}
 
-	if rb.Capacity() != 0 {
-		rb.canFill <- true
-	}
-
-	return nbytes, err
+	rb.head = (rb.head + n) % cap(rb.buffer)
+	rb.filled = false
 }
 
 func (rb *RingBuffer) Read(p []byte) (int, error) {
-	if rb.rdErr != nil && rb.rdErr != io.EOF {
-		return 0, rb.rdErr
-	}
+	rb.callMutex.Lock()
+	defer rb.callMutex.Unlock()
 
-	if rb.rdErr == io.EOF && rb.IsEmpty() {
-		return 0, rb.rdErr
-	}
+	nbytes := 0
+	for nbytes < len(p) {
+		rb.prefillBuffer()
 
-	<-rb.canRead
+		if rb.len() == 0 {
+			if rb.rdErr != nil {
+				if rb.rdErr == io.EOF {
+					return nbytes, io.EOF
+				}
+				return 0, rb.rdErr
+			}
+		}
 
-	if !rb.filled && rb.head == rb.tail {
-		return 0, io.EOF
-	}
+		// 3 cases:
+		// 1. first one, there's more data in the ring buffer than we can handle
+		rblen := rb.len()
+		if rblen > len(p)-nbytes {
+			rblen = len(p) - nbytes
+		}
 
-	nbytes := len(p)
-	if nbytes > rb.Len() {
-		nbytes = rb.Len()
-	}
+		// 2. second one, there's less data in the ring buffer than we can handle
+		rb.readBytes(p[nbytes : nbytes+rblen])
+		nbytes += rblen
 
-	if rb.head <= rb.tail {
-		copy(p[:nbytes], rb.buffer[rb.head:rb.head+nbytes])
-		rb.head = (rb.head + nbytes) % cap(rb.buffer)
-	} else {
-		// Tail is before head, so we need to read in two parts
-		available := cap(rb.buffer) - rb.head
-		if nbytes <= available {
-			copy(p, rb.buffer[rb.head:rb.head+nbytes])
-			rb.head = (rb.head + nbytes) % cap(rb.buffer)
-		} else {
-			copy(p, rb.buffer[rb.head:])
-			copy(p[available:], rb.buffer[:nbytes-available])
-			rb.head = nbytes - available
+		if rb.len() == 0 {
+			return nbytes, nil
 		}
 	}
-
-	rb.filled = false
-	if rb.rdErr != io.EOF {
-		rb.canFill <- true
-	}
-
-	if !rb.IsEmpty() {
-		rb.canRead <- true
-	}
-
-	return nbytes, nil
+	return nbytes, rb.rdErr
 }

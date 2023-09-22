@@ -1,6 +1,7 @@
 package ringbuffer
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"math/rand"
@@ -26,13 +27,48 @@ var rb, _ = io.ReadAll(io.LimitReader(rand.New(rand.NewSource(0)), datalen))
 func Test(t *testing.T) {
 }
 
+func Benchmark_IOReader(b *testing.B) {
+	r := bytes.NewReader(rb)
+	b.SetBytes(int64(r.Len()))
+	buf := make([]byte, 8<<10)
+	b.ResetTimer()
+	nchunks := 0
+	for i := 0; i < b.N; i++ {
+		_, _ = r.Read(buf)
+		nchunks++
+		r.Reset(rb)
+	}
+	b.ReportMetric(float64(nchunks)/float64(b.N), "chunks")
+}
+
+func Benchmark_BufIOReader(b *testing.B) {
+	r := bytes.NewReader(rb)
+	b.SetBytes(int64(r.Len()))
+	buf := make([]byte, 8<<10)
+
+	rd := bufio.NewReader(r)
+	b.ResetTimer()
+	nchunks := 0
+	for i := 0; i < b.N; i++ {
+		_, _ = rd.Read(buf)
+		nchunks++
+		r.Reset(rb)
+	}
+	b.ReportMetric(float64(nchunks)/float64(b.N), "chunks")
+}
+
 func Benchmark(b *testing.B) {
 	r := bytes.NewReader(rb)
 	b.SetBytes(int64(r.Len()))
+
+	buf := make([]byte, 8*1024)
 	b.ResetTimer()
-	//nchunks := 0
+	nchunks := 0
+	rd := NewReaderSize(r, 8*1024)
 	for i := 0; i < b.N; i++ {
+		_, _ = rd.Read(buf)
+		nchunks++
 		r.Reset(rb)
 	}
-	// b.ReportMetric(float64(nchunks)/float64(b.N), "chunks")
+	b.ReportMetric(float64(nchunks)/float64(b.N), "chunks")
 }
