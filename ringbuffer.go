@@ -55,7 +55,7 @@ func NewReaderSize(rd io.Reader, size int) *RingBuffer {
 
 func (rb *RingBuffer) prefillBuffer() {
 	if rb.rd != nil && rb.Capacity() != 0 && rb.rdErr != io.EOF {
-		n, err := rb.rd.Read(rb.prefill)
+		n, err := rb.rd.Read(rb.prefill[0:rb.Capacity()])
 		if err != nil && err != io.EOF {
 			rb.rdErr = err
 			return
@@ -122,10 +122,11 @@ func (rb *RingBuffer) writeBytes(data []byte) {
 
 	delta := rb.tail - rb.head
 	if delta < 0 {
-		delta += cap(rb.buffer)
+		delta = -delta
 	} else {
 		delta = cap(rb.buffer) - delta
 	}
+
 	if delta < len(data) {
 		panic("RingBuffer overflow")
 	}
@@ -225,5 +226,40 @@ func (rb *RingBuffer) Read(p []byte) (int, error) {
 			return nbytes, nil
 		}
 	}
-	return nbytes, rb.rdErr
+	if nbytes != 0 {
+		return nbytes, nil
+	}
+
+	return 0, rb.rdErr
+}
+
+func (rb *RingBuffer) peekBytes(data []byte) {
+	rb.bufferMutex.Lock()
+	defer rb.bufferMutex.Unlock()
+
+	n := len(data)
+	if n > rb.len() {
+		panic("RingBuffer underflow")
+	}
+
+	if rb.head+n <= cap(rb.buffer) {
+		copy(data, rb.buffer[rb.head:rb.head+n])
+	} else {
+		pivot := cap(rb.buffer) - rb.head
+		copy(data[:pivot], rb.buffer[rb.head:])
+		copy(data[pivot:], rb.buffer[:n-pivot])
+	}
+}
+
+func (rb *RingBuffer) Peek(p []byte) (int, error) {
+	rb.callMutex.Lock()
+	defer rb.callMutex.Unlock()
+
+	rb.prefillBuffer()
+	rblen := rb.len()
+	if rblen > len(p) {
+		rblen = len(p)
+	}
+	rb.peekBytes(p[:rblen])
+	return rblen, rb.rdErr
 }
