@@ -48,6 +48,7 @@ func NewReaderSize(rd io.Reader, size int) *RingBuffer {
 	return rb
 }
 
+// this can be reworked to get rid of the prefill buffer and write directly in rb.buffer
 func (rb *RingBuffer) prefillBuffer() {
 	if rb.rdErr != nil {
 		return
@@ -55,6 +56,7 @@ func (rb *RingBuffer) prefillBuffer() {
 	if rb.rd != nil && rb.unlockedCapacity() != 0 && rb.rdErr != io.EOF {
 		n, err := rb.rd.Read(rb.prefill[0:rb.unlockedCapacity()])
 		if err != nil && err != io.EOF {
+			rb.rd = nil
 			rb.rdErr = err
 			return
 		}
@@ -62,6 +64,7 @@ func (rb *RingBuffer) prefillBuffer() {
 		if err == io.EOF {
 			rb.rd = nil
 			rb.rdErr = io.EOF
+			return
 		}
 	}
 }
@@ -106,37 +109,18 @@ func (rb *RingBuffer) writeBytes(data []byte) {
 		copy(rb.buffer, data[pivot:])
 	}
 
-	/*
-		if int(rb.tail)+len(data) <= cap(rb.buffer) {
-			copy(rb.buffer[rb.tail:], data)
-		} else {
-			pivot := cap(rb.buffer) - int(rb.tail)
-			copy(rb.buffer[rb.tail:], data[:pivot])
-			copy(rb.buffer[0:], data[pivot:])
-		}
-	*/
-
 	rb.tail = int32((int(rb.tail) + len(data)) % cap(rb.buffer))
 	if rb.head == rb.tail {
 		rb.filled = 1
 	}
 }
 
-func (rb *RingBuffer) skip(n int) {
-	if n > rb.unlockedLen() {
-		panic("RingBuffer overflow")
-	}
-
-	rb.head = int32((int(rb.head) + n) % cap(rb.buffer))
-	rb.filled = 0
-}
-
 func (rb *RingBuffer) Skip(n int) {
-
 	if n > rb.unlockedLen() {
 		n = rb.unlockedLen()
 	}
-	rb.skip(n)
+	rb.head = int32((int(rb.head) + n) % cap(rb.buffer))
+	rb.filled = 0
 }
 
 func (rb *RingBuffer) Write(data []byte) (int, error) {
@@ -154,29 +138,22 @@ func (rb *RingBuffer) Write(data []byte) (int, error) {
 
 	rb.writeBytes(data[:nbytes])
 
-	//fmt.Println("write:", "head", rb.head, "tail", rb.tail, "filled", rb.filled, "len", rb.Len(), "cap", rb.Capacity())
 	if nbytes != len(data) {
 		return nbytes, io.ErrShortWrite
 	}
 	return nbytes, nil
 }
 
-func (rb *RingBuffer) readBytes(data []byte) {
+func (rb *RingBuffer) copyToBuffer(data []byte, start int) {
 	n := len(data)
-	if n > rb.unlockedLen() {
-		panic("RingBuffer underflow")
-	}
-
-	if int(rb.head)+n <= cap(rb.buffer) {
-		copy(data, rb.buffer[rb.head:rb.head+int32(n)])
+	end := start + len(data)
+	if end <= cap(rb.buffer) {
+		copy(data, rb.buffer[start:end])
 	} else {
-		pivot := cap(rb.buffer) - int(rb.head)
-		copy(data[:pivot], rb.buffer[rb.head:])
+		pivot := cap(rb.buffer) - int(start)
+		copy(data[:pivot], rb.buffer[start:])
 		copy(data[pivot:], rb.buffer[:n-pivot])
 	}
-
-	rb.head = int32((int(rb.head) + n) % cap(rb.buffer))
-	rb.filled = 0
 }
 
 func (rb *RingBuffer) Read(p []byte) (int, error) {
@@ -195,14 +172,14 @@ func (rb *RingBuffer) Read(p []byte) (int, error) {
 			}
 		}
 
-		// 3 cases:
-		// 1. first one, there's more data in the ring buffer than we can handle
 		if rblen > len(p)-nbytes {
 			rblen = len(p) - nbytes
 		}
 
-		// 2. second one, there's less data in the ring buffer than we can handle
-		rb.readBytes(p[nbytes : nbytes+rblen])
+		rb.copyToBuffer(p[nbytes:nbytes+rblen], int(rb.head))
+		rb.head = int32((int(rb.head) + rblen) % cap(rb.buffer))
+		rb.filled = 0
+
 		nbytes += rblen
 
 		if rb.unlockedLen() == 0 {
@@ -216,37 +193,13 @@ func (rb *RingBuffer) Read(p []byte) (int, error) {
 	return 0, rb.rdErr
 }
 
-func (rb *RingBuffer) peekBytes(data []byte) {
-	n := len(data)
-	if n > rb.unlockedLen() {
-		panic("RingBuffer underflow")
-	}
-
-	if int(rb.head)+n > cap(rb.buffer) {
-		pivot := cap(rb.buffer) - int(rb.head)
-		copy(data[:pivot], rb.buffer[rb.head:])
-		copy(data[pivot:], rb.buffer[:n-pivot])
-	} else {
-		copy(data, rb.buffer[rb.head:rb.head+int32(n)])
-	}
-
-	/*
-		if int(rb.head)+n <= cap(rb.buffer) {
-			copy(data, rb.buffer[rb.head:rb.head+int32(n)])
-		} else {
-			pivot := cap(rb.buffer) - int(rb.head)
-			copy(data[:pivot], rb.buffer[rb.head:])
-			copy(data[pivot:], rb.buffer[:n-pivot])
-		}
-	*/
-}
-
 func (rb *RingBuffer) Peek(p []byte) (int, error) {
 	rb.prefillBuffer()
+
 	rblen := rb.unlockedLen()
 	if rblen > len(p) {
 		rblen = len(p)
 	}
-	rb.peekBytes(p[:rblen])
+	rb.copyToBuffer(p[:rblen], int(rb.head))
 	return rblen, rb.rdErr
 }

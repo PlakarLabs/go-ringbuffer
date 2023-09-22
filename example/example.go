@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"io"
 	"log"
 	"os"
@@ -18,6 +19,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	rb := ringbuffer.NewReaderSize(rd, 1024)
+	rb := ringbuffer.NewReaderSize(bufio.NewReader(rd), 1024)
 	io.Copy(os.Stdout, rb)
 }
