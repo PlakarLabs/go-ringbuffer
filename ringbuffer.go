@@ -27,6 +27,7 @@ type RingBuffer struct {
 	prefill []byte
 
 	buffer []byte
+	retbuf []byte
 	head   int32
 	tail   int32
 	filled int32
@@ -37,6 +38,7 @@ var ErrBufferFull = errors.New("ringbuffer: buffer is full")
 func New(size int) *RingBuffer {
 	return &RingBuffer{
 		buffer: make([]byte, size),
+		retbuf: make([]byte, size),
 	}
 }
 
@@ -49,6 +51,7 @@ func NewReaderSize(rd io.Reader, size int) *RingBuffer {
 }
 
 // this can be reworked to get rid of the prefill buffer and write directly in rb.buffer
+/*
 func (rb *RingBuffer) prefillBuffer() {
 	if rb.rdErr != nil {
 		return
@@ -66,6 +69,31 @@ func (rb *RingBuffer) prefillBuffer() {
 			rb.rdErr = io.EOF
 			return
 		}
+	}
+}
+*/
+
+func (rb *RingBuffer) prefillBuffer() {
+	if rb.rd == nil || rb.rdErr != nil {
+		return
+	}
+
+	totalCapacity := rb.unlockedCapacity()
+	if totalCapacity == 0 {
+		return
+	}
+
+	n, err := rb.rd.Read(rb.prefill[0:totalCapacity])
+	if err != nil && err != io.EOF {
+		rb.rd = nil
+		rb.rdErr = err
+		return
+	}
+	rb.writeBytes(rb.prefill[:n])
+	if err == io.EOF {
+		rb.rd = nil
+		rb.rdErr = io.EOF
+		return
 	}
 }
 
@@ -115,33 +143,13 @@ func (rb *RingBuffer) writeBytes(data []byte) {
 	}
 }
 
-func (rb *RingBuffer) Skip(n int) {
+func (rb *RingBuffer) Discard(n int) (int, error) {
 	if n > rb.unlockedLen() {
 		n = rb.unlockedLen()
 	}
 	rb.head = int32((int(rb.head) + n) % cap(rb.buffer))
 	rb.filled = 0
-}
-
-func (rb *RingBuffer) Write(data []byte) (int, error) {
-
-	filled := rb.filled
-	if filled != 0 {
-		return 0, ErrBufferFull
-	}
-
-	nbytes := len(data)
-	capacity := rb.unlockedCapacity()
-	if nbytes > capacity {
-		nbytes = capacity
-	}
-
-	rb.writeBytes(data[:nbytes])
-
-	if nbytes != len(data) {
-		return nbytes, io.ErrShortWrite
-	}
-	return nbytes, nil
+	return n, nil
 }
 
 func (rb *RingBuffer) copyToBuffer(data []byte, start int) {
@@ -156,50 +164,13 @@ func (rb *RingBuffer) copyToBuffer(data []byte, start int) {
 	}
 }
 
-func (rb *RingBuffer) Read(p []byte) (int, error) {
-
-	nbytes := 0
-	for nbytes < len(p) {
-		rb.prefillBuffer()
-
-		rblen := rb.unlockedLen()
-		if rblen == 0 {
-			if rb.rdErr != nil {
-				if rb.rdErr == io.EOF {
-					return nbytes, io.EOF
-				}
-				return 0, rb.rdErr
-			}
-		}
-
-		if rblen > len(p)-nbytes {
-			rblen = len(p) - nbytes
-		}
-
-		rb.copyToBuffer(p[nbytes:nbytes+rblen], int(rb.head))
-		rb.head = int32((int(rb.head) + rblen) % cap(rb.buffer))
-		rb.filled = 0
-
-		nbytes += rblen
-
-		if rb.unlockedLen() == 0 {
-			return nbytes, nil
-		}
-	}
-	if nbytes != 0 {
-		return nbytes, nil
-	}
-
-	return 0, rb.rdErr
-}
-
-func (rb *RingBuffer) Peek(p []byte) (int, error) {
+func (rb *RingBuffer) Peek(size int) ([]byte, error) {
 	rb.prefillBuffer()
 
 	rblen := rb.unlockedLen()
-	if rblen > len(p) {
-		rblen = len(p)
+	if rblen > size {
+		rblen = size
 	}
-	rb.copyToBuffer(p[:rblen], int(rb.head))
-	return rblen, rb.rdErr
+	rb.copyToBuffer(rb.retbuf[:rblen], int(rb.head))
+	return rb.retbuf[:rblen], rb.rdErr
 }

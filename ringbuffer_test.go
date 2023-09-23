@@ -61,12 +61,12 @@ func Benchmark(b *testing.B) {
 	r := bytes.NewReader(rb)
 	b.SetBytes(int64(r.Len()))
 
-	buf := make([]byte, 8<<10)
 	b.ResetTimer()
 	nchunks := 0
 	rd := NewReaderSize(r, 16<<10)
 	for i := 0; i < b.N; i++ {
-		_, _ = rd.Read(buf)
+		_, _ = rd.Peek(8 << 10)
+		_, _ = rd.Discard(8 << 10)
 		nchunks++
 		r.Reset(rb)
 	}
