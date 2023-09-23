@@ -42,18 +42,15 @@ func New(size int) *RingBuffer {
 func NewReaderSize(rd io.Reader, size int) *RingBuffer {
 	rb := New(size)
 	rb.rd = rd
-	rb.prefillBuffer()
 	return rb
 }
 
-func (rb *RingBuffer) prefillBuffer() {
-	if rb.rd == nil || rb.rdErr != nil {
-		return
-	}
-
+func (rb *RingBuffer) prefillBuffer() int {
 	totalCapacity := rb.unlockedCapacity()
-	if totalCapacity == 0 {
-		return
+	totalLen := rb.unlockedLen()
+
+	if rb.rd == nil || rb.rdErr != nil || totalCapacity == 0 {
+		return totalLen
 	}
 
 	var rCapacity int
@@ -67,10 +64,11 @@ func (rb *RingBuffer) prefillBuffer() {
 	if err != nil && err != io.EOF {
 		rb.rd = nil
 		rb.rdErr = err
-		return
+		return totalLen
 	}
 	if n != 0 {
 		rb.tail = (rb.tail + n) % cap(rb.buffer)
+		totalLen += n
 	}
 
 	if rCapacity < totalCapacity && err != io.EOF {
@@ -79,10 +77,11 @@ func (rb *RingBuffer) prefillBuffer() {
 		if err != nil && err != io.EOF {
 			rb.rd = nil
 			rb.rdErr = err
-			return
+			return totalLen
 		}
 		if n != 0 {
 			rb.tail = (rb.tail + n) % cap(rb.buffer)
+			totalLen += n
 		}
 	}
 
@@ -93,8 +92,8 @@ func (rb *RingBuffer) prefillBuffer() {
 	if err == io.EOF {
 		rb.rd = nil
 		rb.rdErr = io.EOF
-		return
 	}
+	return totalLen
 }
 
 func (rb *RingBuffer) unlockedCapacity() int {
@@ -102,7 +101,7 @@ func (rb *RingBuffer) unlockedCapacity() int {
 		return 0
 	}
 
-	delta := int(rb.tail) - int(rb.head)
+	delta := rb.tail - rb.head
 	if delta < 0 {
 		return -delta
 	} else {
@@ -124,21 +123,21 @@ func (rb *RingBuffer) Discard(n int) (int, error) {
 }
 
 func (rb *RingBuffer) copyToBuffer(data []byte, start int) {
-	n := len(data)
 	end := start + len(data)
 	if end <= cap(rb.buffer) {
 		copy(data, rb.buffer[start:end])
 	} else {
-		pivot := cap(rb.buffer) - int(start)
+		pivot := cap(rb.buffer) - start
 		copy(data[:pivot], rb.buffer[start:])
-		copy(data[pivot:], rb.buffer[:n-pivot])
+		copy(data[pivot:], rb.buffer[:end%cap(rb.buffer)])
 	}
 }
 
 func (rb *RingBuffer) Peek(size int) ([]byte, error) {
-	rb.prefillBuffer()
-
 	rblen := rb.unlockedLen()
+	if rblen < size {
+		rblen = rb.prefillBuffer()
+	}
 	if rblen > size {
 		rblen = size
 	}
