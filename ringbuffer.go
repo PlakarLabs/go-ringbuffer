@@ -17,23 +17,20 @@
 package ringbuffer
 
 import (
-	"errors"
 	"io"
 )
 
 type RingBuffer struct {
-	rd      io.Reader
-	rdErr   error
-	prefill []byte
+	rd    io.Reader
+	rdErr error
 
 	buffer []byte
 	retbuf []byte
 	head   int
 	tail   int
+
 	filled bool
 }
-
-var ErrBufferFull = errors.New("ringbuffer: buffer is full")
 
 func New(size int) *RingBuffer {
 	return &RingBuffer{
@@ -45,34 +42,10 @@ func New(size int) *RingBuffer {
 func NewReaderSize(rd io.Reader, size int) *RingBuffer {
 	rb := New(size)
 	rb.rd = rd
-	rb.prefill = make([]byte, size)
 	rb.prefillBuffer()
 	return rb
 }
 
-// this can be reworked to get rid of the prefill buffer and write directly in rb.buffer
-
-func (rb *RingBuffer) prefillBuffer() {
-	if rb.rdErr != nil {
-		return
-	}
-	if rb.rd != nil && rb.unlockedCapacity() != 0 && rb.rdErr != io.EOF {
-		n, err := rb.rd.Read(rb.prefill[0:rb.unlockedCapacity()])
-		if err != nil && err != io.EOF {
-			rb.rd = nil
-			rb.rdErr = err
-			return
-		}
-		rb.writeBytes(rb.prefill[:n])
-		if err == io.EOF {
-			rb.rd = nil
-			rb.rdErr = io.EOF
-			return
-		}
-	}
-}
-
-/*
 func (rb *RingBuffer) prefillBuffer() {
 	if rb.rd == nil || rb.rdErr != nil {
 		return
@@ -90,24 +63,39 @@ func (rb *RingBuffer) prefillBuffer() {
 		rCapacity = cap(rb.buffer) - rb.tail
 	}
 
-	rCapacity := cap(rb.buffer) - int(rb.tail)
-	if rCapacity < totalCapacity {
-	}
-
-	n, err := rb.rd.Read(rb.prefill[0:totalCapacity])
+	n, err := rb.rd.Read(rb.buffer[rb.tail : rb.tail+rCapacity])
 	if err != nil && err != io.EOF {
 		rb.rd = nil
 		rb.rdErr = err
 		return
 	}
-	rb.writeBytes(rb.prefill[:n])
+	if n != 0 {
+		rb.tail = (rb.tail + n) % cap(rb.buffer)
+	}
+
+	if rCapacity < totalCapacity && err != io.EOF {
+		lCapacity := totalCapacity - rCapacity
+		n, err := rb.rd.Read(rb.buffer[rb.tail : rb.tail+lCapacity])
+		if err != nil && err != io.EOF {
+			rb.rd = nil
+			rb.rdErr = err
+			return
+		}
+		if n != 0 {
+			rb.tail = (rb.tail + n) % cap(rb.buffer)
+		}
+	}
+
+	if rb.head == rb.tail {
+		rb.filled = true
+	}
+
 	if err == io.EOF {
 		rb.rd = nil
 		rb.rdErr = io.EOF
 		return
 	}
 }
-*/
 
 func (rb *RingBuffer) unlockedCapacity() int {
 	if rb.filled {
@@ -124,35 +112,6 @@ func (rb *RingBuffer) unlockedCapacity() int {
 
 func (rb *RingBuffer) unlockedLen() int {
 	return cap(rb.buffer) - rb.unlockedCapacity()
-}
-
-func (rb *RingBuffer) writeBytes(data []byte) {
-	delta := int(rb.tail) - int(rb.head)
-	if delta < 0 {
-		delta = -delta
-	} else {
-		delta = cap(rb.buffer) - delta
-	}
-
-	if delta < len(data) {
-		panic("RingBuffer overflow")
-	}
-
-	end := int(rb.tail) + len(data)
-	if end <= cap(rb.buffer) {
-		copy(rb.buffer[rb.tail:], data)
-	} else {
-		pivot := int32(cap(rb.buffer) - int(rb.tail))
-		if pivot > 0 {
-			copy(rb.buffer[rb.tail:], data[:pivot])
-		}
-		copy(rb.buffer, data[pivot:])
-	}
-
-	rb.tail = (int(rb.tail) + len(data)) % cap(rb.buffer)
-	if rb.head == rb.tail {
-		rb.filled = true
-	}
 }
 
 func (rb *RingBuffer) Discard(n int) (int, error) {
