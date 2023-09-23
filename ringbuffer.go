@@ -28,9 +28,9 @@ type RingBuffer struct {
 
 	buffer []byte
 	retbuf []byte
-	head   int32
-	tail   int32
-	filled int32
+	head   int
+	tail   int
+	filled bool
 }
 
 var ErrBufferFull = errors.New("ringbuffer: buffer is full")
@@ -51,7 +51,7 @@ func NewReaderSize(rd io.Reader, size int) *RingBuffer {
 }
 
 // this can be reworked to get rid of the prefill buffer and write directly in rb.buffer
-/*
+
 func (rb *RingBuffer) prefillBuffer() {
 	if rb.rdErr != nil {
 		return
@@ -71,8 +71,8 @@ func (rb *RingBuffer) prefillBuffer() {
 		}
 	}
 }
-*/
 
+/*
 func (rb *RingBuffer) prefillBuffer() {
 	if rb.rd == nil || rb.rdErr != nil {
 		return
@@ -81,6 +81,17 @@ func (rb *RingBuffer) prefillBuffer() {
 	totalCapacity := rb.unlockedCapacity()
 	if totalCapacity == 0 {
 		return
+	}
+
+	var rCapacity int
+	if rb.tail < rb.head {
+		rCapacity = rb.head - rb.tail
+	} else {
+		rCapacity = cap(rb.buffer) - rb.tail
+	}
+
+	rCapacity := cap(rb.buffer) - int(rb.tail)
+	if rCapacity < totalCapacity {
 	}
 
 	n, err := rb.rd.Read(rb.prefill[0:totalCapacity])
@@ -96,9 +107,10 @@ func (rb *RingBuffer) prefillBuffer() {
 		return
 	}
 }
+*/
 
 func (rb *RingBuffer) unlockedCapacity() int {
-	if rb.filled == 1 {
+	if rb.filled {
 		return 0
 	}
 
@@ -137,9 +149,9 @@ func (rb *RingBuffer) writeBytes(data []byte) {
 		copy(rb.buffer, data[pivot:])
 	}
 
-	rb.tail = int32((int(rb.tail) + len(data)) % cap(rb.buffer))
+	rb.tail = (int(rb.tail) + len(data)) % cap(rb.buffer)
 	if rb.head == rb.tail {
-		rb.filled = 1
+		rb.filled = true
 	}
 }
 
@@ -147,8 +159,8 @@ func (rb *RingBuffer) Discard(n int) (int, error) {
 	if n > rb.unlockedLen() {
 		n = rb.unlockedLen()
 	}
-	rb.head = int32((int(rb.head) + n) % cap(rb.buffer))
-	rb.filled = 0
+	rb.head = (int(rb.head) + n) % cap(rb.buffer)
+	rb.filled = false
 	return n, nil
 }
 
