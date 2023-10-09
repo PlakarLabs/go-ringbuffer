@@ -25,7 +25,6 @@ type RingBuffer struct {
 	rdErr error
 
 	buffer []byte
-	retbuf []byte
 	head   int
 	tail   int
 
@@ -35,7 +34,6 @@ type RingBuffer struct {
 func New(size int) *RingBuffer {
 	return &RingBuffer{
 		buffer: make([]byte, size),
-		retbuf: make([]byte, size),
 	}
 }
 
@@ -133,14 +131,35 @@ func (rb *RingBuffer) copyToBuffer(data []byte, start int) {
 	}
 }
 
-func (rb *RingBuffer) Peek(size int) ([]byte, error) {
+func (rb *RingBuffer) Peek(p []byte) (int, error) {
+	size := len(p)
 	rblen := rb.unlockedLen()
-	if rblen < size {
+	if size > rblen && rb.rd != nil {
 		rblen = rb.prefillBuffer()
 	}
-	if rblen > size {
+	if rblen < size {
+		size = rblen
+	} else if rblen > size {
 		rblen = size
 	}
-	rb.copyToBuffer(rb.retbuf[:rblen], int(rb.head))
-	return rb.retbuf[:rblen], rb.rdErr
+
+	rb.copyToBuffer(p[:rblen], int(rb.head))
+	return rblen, rb.rdErr
+}
+
+func (rb *RingBuffer) Read(p []byte) (int, error) {
+	size := len(p)
+	rblen := rb.unlockedLen()
+	if size > rblen && rb.rd != nil {
+		rblen = rb.prefillBuffer()
+	}
+	if rblen < size {
+		size = rblen
+	} else if rblen > size {
+		rblen = size
+	}
+
+	rb.copyToBuffer(p[:rblen], int(rb.head))
+	rb.Discard(rblen)
+	return rblen, rb.rdErr
 }

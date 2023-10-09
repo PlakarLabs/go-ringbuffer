@@ -3,72 +3,106 @@ package ringbuffer
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"io"
 	"math/rand"
 	"testing"
 )
 
 const (
-	minsize = 2 << 10
-	avgsize = 10 << 10
-	maxsize = 64 << 10
-	norm    = 0
 	datalen = 128 << 20
+	bufsize = 64 << 10
 )
-
-type writerFunc func([]byte) (int, error)
-
-func (fn writerFunc) Write(p []byte) (int, error) {
-	return fn(p)
-}
 
 var rb, _ = io.ReadAll(io.LimitReader(rand.New(rand.NewSource(0)), datalen))
 
 func Test(t *testing.T) {
+	r := bytes.NewReader(rb)
+
+	hasher := sha256.New()
+	hasher.Write(rb)
+	sum1 := hasher.Sum(nil)
+
+	hasher.Reset()
+
+	rbuf := NewReaderSize(r, bufsize)
+	buf := make([]byte, bufsize)
+	for {
+		n, err := rbuf.Read(buf)
+		if err != nil && err != io.EOF {
+			t.Fatalf(`chunker error: %s`, err)
+		}
+		hasher.Write(buf[:n])
+		if err == io.EOF {
+			break
+		}
+	}
+	sum2 := hasher.Sum(nil)
+
+	if !bytes.Equal(sum1, sum2) {
+		t.Fatalf(`ringbuffer produces incorrect output`)
+	}
 }
 
 func Benchmark_IOReader(b *testing.B) {
 	r := bytes.NewReader(rb)
 	b.SetBytes(int64(r.Len()))
-	buf := make([]byte, 8<<10)
+	buf := make([]byte, bufsize)
 	b.ResetTimer()
-	nchunks := 0
 	for i := 0; i < b.N; i++ {
-		_, _ = r.Read(buf)
-		nchunks++
+		for {
+			n, err := r.Read(buf)
+			if err != nil && err != io.EOF {
+				b.Fatalf(`io error: %s`, err)
+			}
+			_ = buf[:n]
+			if err == io.EOF {
+				break
+			}
+		}
 		r.Reset(rb)
 	}
-	b.ReportMetric(float64(nchunks)/float64(b.N), "chunks")
 }
 
 func Benchmark_BufIOReader(b *testing.B) {
 	r := bytes.NewReader(rb)
 	b.SetBytes(int64(r.Len()))
-	buf := make([]byte, 8<<10)
-
-	rd := bufio.NewReader(r)
+	buf := make([]byte, bufsize)
 	b.ResetTimer()
-	nchunks := 0
 	for i := 0; i < b.N; i++ {
-		_, _ = rd.Read(buf)
-		nchunks++
+		rd := bufio.NewReaderSize(r, bufsize)
+		for {
+			n, err := rd.Read(buf)
+			if err != nil && err != io.EOF {
+				b.Fatalf(`bufio error: %s`, err)
+			}
+			_ = buf[:n]
+			if err == io.EOF {
+				break
+			}
+		}
 		r.Reset(rb)
 	}
-	b.ReportMetric(float64(nchunks)/float64(b.N), "chunks")
 }
 
-func Benchmark(b *testing.B) {
+func Benchmark_RingbufferReader(b *testing.B) {
 	r := bytes.NewReader(rb)
 	b.SetBytes(int64(r.Len()))
+	buf := make([]byte, bufsize)
 
 	b.ResetTimer()
-	nchunks := 0
-	rd := NewReaderSize(r, 16<<10)
 	for i := 0; i < b.N; i++ {
-		_, _ = rd.Peek(8 << 10)
-		_, _ = rd.Discard(8 << 10)
-		nchunks++
+		rd := NewReaderSize(r, bufsize)
+		for {
+			n, err := rd.Read(buf)
+			if err != nil && err != io.EOF {
+				b.Fatalf(`ringbuffer error: %s`, err)
+			}
+			_ = buf[:n]
+			if err == io.EOF {
+				break
+			}
+		}
 		r.Reset(rb)
 	}
-	b.ReportMetric(float64(nchunks)/float64(b.N), "chunks")
 }
