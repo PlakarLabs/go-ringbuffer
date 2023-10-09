@@ -85,7 +85,7 @@ func Benchmark_BufIOReader(b *testing.B) {
 	}
 }
 
-func Benchmark_RingbufferReader(b *testing.B) {
+func Benchmark_PlakarLabs_RingbufferReader(b *testing.B) {
 	r := bytes.NewReader(rb)
 	b.SetBytes(int64(r.Len()))
 	buf := make([]byte, bufsize)
